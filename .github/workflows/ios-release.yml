@@ -69,29 +69,38 @@ jobs:
 
       # Signing files are kept as sensitive EAS environment variables so every
       # run reuses the same certificate (Apple allows only one per account).
-      - name: Fetch stored signing credentials from EAS
+      - name: Fetch stored signing certificate from EAS
         run: |
-          for k in IOS_DIST_P12_B64 IOS_PROFILE_B64; do
-            if [ -z "${!k:-}" ]; then
-              v=$(eas env:get --variable-name "$k" --variable-environment production --scope project --format short --non-interactive 2>/dev/null | sed -n "s/^$k=//p" | tr -d '[:space:]' || true)
-              if [ -n "$v" ] && [ "$v" != "*****" ]; then echo "::add-mask::$v"; echo "$k=$v" >> "$GITHUB_ENV"; echo "loaded $k from EAS"; else echo "no stored $k"; fi
-            fi
-          done
+          # EAS env values are capped at 4 KiB, so the p12 is stored in chunks.
+          if [ -z "${IOS_DIST_P12_B64:-}" ]; then
+            v=""
+            for i in 0 1 2 3; do
+              c=$(eas env:get --variable-name "IOS_DIST_P12_B64_$i" --variable-environment production --scope project --format short --non-interactive 2>/dev/null | sed -n "s/^IOS_DIST_P12_B64_$i=//p" | tr -d '[:space:]' || true)
+              if [ -z "$c" ] || [ "$c" = "*****" ]; then break; fi
+              v="$v$c"
+            done
+            if [ -n "$v" ]; then echo "::add-mask::$v"; echo "IOS_DIST_P12_B64=$v" >> "$GITHUB_ENV"; echo "loaded stored certificate from EAS ($(echo -n "$v" | wc -c) chars)"; else echo "no stored certificate"; fi
+          fi
         env:
           EXPO_NO_TELEMETRY: 1
           FORCE_COLOR: 0
 
       - name: Provision signing credentials
         run: |
-          export EXISTING_P12_B64="$IOS_DIST_P12_B64" EXISTING_PROFILE_B64="$IOS_PROFILE_B64"
-          export REVOKE_CERT_FINGERPRINTS="E30DBA39E7A05053F91F292529F177220F3ACC93"
+          export EXISTING_P12_B64="$IOS_DIST_P12_B64"
+          # Throwaway certs from earlier pipeline attempts (Sep 9 2026) may be revoked;
+          # anything older (e.g. BareBible's) is never touched.
+          export REVOKE_CERTS_NEWER_THAN_HOURS="${REVOKE_CERTS_NEWER_THAN_HOURS:-12}"
           python scripts/apple_credentials.py
 
-      - name: Store new signing credentials in EAS
+      - name: Store new signing certificate in EAS
         if: hashFiles('credentials/dist.p12.b64') != ''
         run: |
-          eas env:set --name IOS_DIST_P12_B64 --value "$(cat credentials/dist.p12.b64)" --environment production --scope project --visibility sensitive --type string --non-interactive
-          eas env:set --name IOS_PROFILE_B64 --value "$(cat credentials/appstore.mobileprovision.b64)" --environment production --scope project --visibility sensitive --type string --non-interactive
+          split -b 3000 -d -a 1 credentials/dist.p12.b64 credentials/chunk_
+          for f in credentials/chunk_*; do
+            i=${f##*_}
+            eas env:set --name "IOS_DIST_P12_B64_$i" --value "$(cat "$f")" --environment production --scope project --visibility sensitive --type string --non-interactive
+          done
         env:
           EXPO_NO_TELEMETRY: 1
 
@@ -100,9 +109,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ios-signing-credentials
-          path: |
-            credentials/dist.p12.b64
-            credentials/appstore.mobileprovision.b64
+          path: credentials/dist.p12.b64
           retention-days: 7
 
       - name: EAS build (iOS, production)

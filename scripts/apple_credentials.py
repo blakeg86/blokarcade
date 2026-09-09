@@ -13,6 +13,8 @@ Env:
   APP_NAME                                   used for bundle ID / profile names
   P12_PASSWORD                               password for the exported .p12
   EXISTING_P12_B64 / EXISTING_PROFILE_B64    optional: reuse previously created files
+  REVOKE_CERT_FINGERPRINTS                   optional: comma-separated SHA-1 fingerprints of
+                                             orphaned distribution certs to revoke first
 """
 import base64
 import datetime as dt
@@ -71,6 +73,26 @@ def ensure_bundle_id() -> str:
     return created["data"]["id"]
 
 
+def sha1_fingerprint(cert_b64: str) -> str:
+    cert = x509.load_der_x509_certificate(base64.b64decode(cert_b64))
+    return cert.fingerprint(hashes.SHA1()).hex().upper()
+
+
+def revoke_orphaned_certificates():
+    """Apple allows a single current iOS Distribution certificate. If an earlier
+    run created one whose private key we no longer have, revoke it (only when its
+    fingerprint is explicitly listed) so a fresh one can be issued."""
+    wanted = {f.strip().upper() for f in os.environ.get("REVOKE_CERT_FINGERPRINTS", "").split(",") if f.strip()}
+    existing = call("GET", "/certificates", params={"filter[certificateType]": "IOS_DISTRIBUTION", "limit": 200}).get("data", [])
+    for c in existing:
+        fp = sha1_fingerprint(c["attributes"]["certificateContent"])
+        if fp in wanted:
+            call("DELETE", f"/certificates/{c['id']}")
+            print(f"revoked orphaned certificate {c['id']} ({fp})")
+        else:
+            print(f"existing IOS_DISTRIBUTION certificate {c['id']} fingerprint {fp} (kept)")
+
+
 def write_credentials(p12_path: pathlib.Path, profile_path: pathlib.Path):
     creds = {
         "ios": {
@@ -96,6 +118,7 @@ def main():
         return
 
     bundle_id_res = ensure_bundle_id()
+    revoke_orphaned_certificates()
 
     # New key + CSR
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -121,7 +144,7 @@ def main():
     legacy = (
         serialization.PrivateFormat.PKCS12.encryption_builder()
         .kdf_rounds(50000)
-        .key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESC)
+        .key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESCBC)
         .hmac_hash(hashes.SHA1())
         .build(P12_PASSWORD.encode())
     )

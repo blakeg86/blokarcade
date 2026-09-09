@@ -20,17 +20,17 @@ node scripts/smoke.mjs  # Playwright: plays every game headlessly, fails on cons
 
 ## Ship to the App Store
 
-`.github/workflows/ios-release.yml` builds with EAS and submits to App Store Connect. It needs these repository secrets:
+`.github/workflows/ios-release.yml` builds with EAS and submits to App Store Connect. It needs one repository secret, **`RELEASE_BUNDLE`**: a base64-encoded JSON object with these keys:
 
-| Secret | What |
+| Key | What |
 |---|---|
 | `EXPO_TOKEN` | Expo access token |
 | `ASC_KEY_P8` | Contents of the App Store Connect API key (`AuthKey_XXXX.p8`) |
 | `ASC_KEY_ID`, `ASC_ISSUER_ID` | From the App Store Connect → Integrations page |
 | `APPLE_TEAM_ID` | Developer account Team ID |
+| `ASC_APP_ID` | Numeric Apple ID of the app record in App Store Connect |
 | `P12_PASSWORD` | Any password; protects the generated signing certificate |
-| `ASC_APP_ID` | Numeric Apple ID of the app record in App Store Connect (needed for submit) |
-| `IOS_DIST_P12_B64`, `IOS_PROFILE_B64` | Optional — set from the `ios-signing-credentials` artifact after the first run so later runs reuse the same certificate |
+| `IOS_DIST_P12_B64`, `IOS_PROFILE_B64` | Optional — from the `ios-signing-credentials` artifact after the first run, so later runs reuse the same certificate |
 
 The first run mints a distribution certificate + App Store provisioning profile through Apple's API (`scripts/apple_credentials.py`) and passes them to EAS as local credentials.
 

@@ -1,0 +1,118 @@
+name: iOS release (EAS build + App Store submit)
+
+on:
+  workflow_dispatch:
+    inputs:
+      submit:
+        description: "Submit to App Store Connect after the build"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ios-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      BUNDLE_ID: app.rork.blokarcade-match-run-drop
+      APP_NAME: BlokArcade
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      ASC_KEY_PATH: ${{ github.workspace }}/credentials/AuthKey.p8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm install -g eas-cli@latest
+          pip install --quiet pyjwt cryptography requests
+
+      - name: Verify app
+        run: |
+          npx tsc --noEmit
+          npx jest --ci
+
+      - name: Write App Store Connect key
+        run: |
+          mkdir -p credentials
+          echo "${{ secrets.ASC_KEY_P8 }}" > "$ASC_KEY_PATH"
+
+      - name: Provision signing credentials
+        env:
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          EXISTING_P12_B64: ${{ secrets.IOS_DIST_P12_B64 }}
+          EXISTING_PROFILE_B64: ${{ secrets.IOS_PROFILE_B64 }}
+        run: python scripts/apple_credentials.py
+
+      - name: Save newly created credentials (reuse them as secrets next time)
+        if: hashFiles('credentials/dist.p12.b64') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-signing-credentials
+          path: |
+            credentials/dist.p12.b64
+            credentials/appstore.mobileprovision.b64
+          retention-days: 7
+
+      - name: Link EAS project
+        run: eas init --force --non-interactive
+        env:
+          EXPO_NO_TELEMETRY: 1
+
+      - name: EAS build (iOS, production)
+        run: eas build --platform ios --profile production --non-interactive --no-wait --json > build.json
+        env:
+          EXPO_NO_TELEMETRY: 1
+          EXPO_ASC_API_KEY_PATH: ${{ env.ASC_KEY_PATH }}
+          EXPO_ASC_KEY_ID: ${{ env.ASC_KEY_ID }}
+          EXPO_ASC_ISSUER_ID: ${{ env.ASC_ISSUER_ID }}
+          EXPO_APPLE_TEAM_ID: ${{ env.APPLE_TEAM_ID }}
+          EXPO_APPLE_TEAM_TYPE: INDIVIDUAL
+
+      - name: Wait for build
+        id: wait
+        run: |
+          BUILD_ID=$(node -e "const b=require('./build.json');console.log((Array.isArray(b)?b[0]:b).id)")
+          echo "build_id=$BUILD_ID" >> "$GITHUB_OUTPUT"
+          echo "Waiting on EAS build $BUILD_ID"
+          for i in $(seq 1 120); do
+            STATUS=$(eas build:view "$BUILD_ID" --json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).status))")
+            echo "[$i] $STATUS"
+            case "$STATUS" in
+              FINISHED) exit 0 ;;
+              ERRORED|CANCELED) eas build:view "$BUILD_ID"; exit 1 ;;
+            esac
+            sleep 45
+          done
+          echo "Timed out waiting for build"; exit 1
+        env:
+          EXPO_NO_TELEMETRY: 1
+
+      - name: Submit to App Store Connect
+        if: ${{ inputs.submit }}
+        run: |
+          if [ -z "${{ secrets.ASC_APP_ID }}" ]; then echo "ASC_APP_ID secret not set (create the app in App Store Connect first)"; exit 1; fi
+          sed -i "s/ASC_APP_ID_PLACEHOLDER/${{ secrets.ASC_APP_ID }}/" eas.json
+          eas submit --platform ios --id "${{ steps.wait.outputs.build_id }}" --profile production --non-interactive
+        env:
+          EXPO_NO_TELEMETRY: 1
+          EXPO_ASC_API_KEY_PATH: ${{ env.ASC_KEY_PATH }}
+          EXPO_ASC_KEY_ID: ${{ env.ASC_KEY_ID }}
+          EXPO_ASC_ISSUER_ID: ${{ env.ASC_ISSUER_ID }}
+          EXPO_APPLE_TEAM_ID: ${{ env.APPLE_TEAM_ID }}
+          EXPO_APPLE_TEAM_TYPE: INDIVIDUAL

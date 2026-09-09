@@ -116,12 +116,17 @@ def main():
     cert = x509.load_der_x509_certificate(cert_der)
     print(f"certificate created: {cert_id}, expires {cert.not_valid_after_utc if hasattr(cert, 'not_valid_after_utc') else cert.not_valid_after}")
 
+    # macOS `security import` (used by EAS build workers) can't read PBES2/AES
+    # PKCS#12 files, so use the legacy SHA1 + 3DES encryption Apple expects.
+    legacy = (
+        serialization.PrivateFormat.PKCS12.encryption_builder()
+        .kdf_rounds(50000)
+        .key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESC)
+        .hmac_hash(hashes.SHA1())
+        .build(P12_PASSWORD.encode())
+    )
     p12 = pkcs12.serialize_key_and_certificates(
-        name=b"distribution",
-        key=key,
-        cert=cert,
-        cas=None,
-        encryption_algorithm=serialization.BestAvailableEncryption(P12_PASSWORD.encode()),
+        name=b"distribution", key=key, cert=cert, cas=None, encryption_algorithm=legacy
     )
     p12_path.write_bytes(p12)
 

@@ -19,13 +19,28 @@ jobs:
     env:
       BUNDLE_ID: app.rork.blokarcade-match-run-drop
       APP_NAME: BlokArcade
-      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       ASC_KEY_PATH: ${{ github.workspace }}/credentials/AuthKey.p8
     steps:
       - uses: actions/checkout@v4
+
+      # One repository secret, RELEASE_BUNDLE, holds everything: a base64-encoded
+      # JSON object with EXPO_TOKEN, ASC_KEY_ID, ASC_ISSUER_ID, APPLE_TEAM_ID,
+      # ASC_APP_ID, P12_PASSWORD, ASC_KEY_P8 and (optionally, after the first
+      # run) IOS_DIST_P12_B64 / IOS_PROFILE_B64.
+      - name: Unpack release bundle
+        env:
+          RELEASE_BUNDLE: ${{ secrets.RELEASE_BUNDLE }}
+        run: |
+          if [ -z "$RELEASE_BUNDLE" ]; then echo "RELEASE_BUNDLE secret is not set"; exit 1; fi
+          mkdir -p credentials
+          echo "$RELEASE_BUNDLE" | tr -d ' \n' | base64 -d > credentials/bundle.json
+          for k in EXPO_TOKEN ASC_KEY_ID ASC_ISSUER_ID APPLE_TEAM_ID ASC_APP_ID P12_PASSWORD IOS_DIST_P12_B64 IOS_PROFILE_B64; do
+            v=$(jq -r --arg k "$k" '.[$k] // empty' credentials/bundle.json)
+            if [ -n "$v" ]; then echo "::add-mask::$v"; echo "$k=$v" >> "$GITHUB_ENV"; fi
+          done
+          jq -r '.ASC_KEY_P8' credentials/bundle.json > "$ASC_KEY_PATH"
+          rm credentials/bundle.json
+          head -c 27 "$ASC_KEY_PATH" | grep -q "BEGIN PRIVATE KEY" || { echo "ASC key looks wrong"; exit 1; }
 
       - uses: actions/setup-node@v4
         with:
@@ -47,17 +62,10 @@ jobs:
           npx tsc --noEmit
           npx jest --ci
 
-      - name: Write App Store Connect key
-        run: |
-          mkdir -p credentials
-          echo "${{ secrets.ASC_KEY_P8 }}" > "$ASC_KEY_PATH"
-
       - name: Provision signing credentials
-        env:
-          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
-          EXISTING_P12_B64: ${{ secrets.IOS_DIST_P12_B64 }}
-          EXISTING_PROFILE_B64: ${{ secrets.IOS_PROFILE_B64 }}
-        run: python scripts/apple_credentials.py
+        run: |
+          export EXISTING_P12_B64="$IOS_DIST_P12_B64" EXISTING_PROFILE_B64="$IOS_PROFILE_B64"
+          python scripts/apple_credentials.py
 
       - name: Save newly created credentials (reuse them as secrets next time)
         if: hashFiles('credentials/dist.p12.b64') != ''
@@ -106,8 +114,8 @@ jobs:
       - name: Submit to App Store Connect
         if: ${{ inputs.submit }}
         run: |
-          if [ -z "${{ secrets.ASC_APP_ID }}" ]; then echo "ASC_APP_ID secret not set (create the app in App Store Connect first)"; exit 1; fi
-          sed -i "s/ASC_APP_ID_PLACEHOLDER/${{ secrets.ASC_APP_ID }}/" eas.json
+          if [ -z "$ASC_APP_ID" ]; then echo "ASC_APP_ID missing from RELEASE_BUNDLE"; exit 1; fi
+          sed -i "s/ASC_APP_ID_PLACEHOLDER/$ASC_APP_ID/" eas.json
           eas submit --platform ios --id "${{ steps.wait.outputs.build_id }}" --profile production --non-interactive
         env:
           EXPO_NO_TELEMETRY: 1

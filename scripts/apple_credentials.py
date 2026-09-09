@@ -12,9 +12,12 @@ Env:
   BUNDLE_ID                                  e.g. app.rork.blokarcade-match-run-drop
   APP_NAME                                   used for bundle ID / profile names
   P12_PASSWORD                               password for the exported .p12
-  EXISTING_P12_B64 / EXISTING_PROFILE_B64    optional: reuse previously created files
+  EXISTING_P12_B64                           optional: reuse a previously created cert (profile is
+                                             looked up / regenerated from it)
   REVOKE_CERT_FINGERPRINTS                   optional: comma-separated SHA-1 fingerprints of
                                              orphaned distribution certs to revoke first
+  REVOKE_CERTS_NEWER_THAN_HOURS              optional: also revoke certs issued within this window
+  KEEP_CERT_FINGERPRINTS                     optional: never revoke these
 """
 import base64
 import datetime as dt
@@ -83,14 +86,61 @@ def revoke_orphaned_certificates():
     run created one whose private key we no longer have, revoke it (only when its
     fingerprint is explicitly listed) so a fresh one can be issued."""
     wanted = {f.strip().upper() for f in os.environ.get("REVOKE_CERT_FINGERPRINTS", "").split(",") if f.strip()}
+    newer_than_hours = float(os.environ.get("REVOKE_CERTS_NEWER_THAN_HOURS", "0") or 0)
+    keep = {f.strip().upper() for f in os.environ.get("KEEP_CERT_FINGERPRINTS", "").split(",") if f.strip()}
+    now = dt.datetime.now(dt.timezone.utc)
     existing = call("GET", "/certificates", params={"filter[certificateType]": "IOS_DISTRIBUTION", "limit": 200}).get("data", [])
     for c in existing:
-        fp = sha1_fingerprint(c["attributes"]["certificateContent"])
-        if fp in wanted:
+        cert = x509.load_der_x509_certificate(base64.b64decode(c["attributes"]["certificateContent"]))
+        fp = cert.fingerprint(hashes.SHA1()).hex().upper()
+        issued = getattr(cert, "not_valid_before_utc", None) or cert.not_valid_before.replace(tzinfo=dt.timezone.utc)
+        age_h = (now - issued).total_seconds() / 3600
+        recent = newer_than_hours > 0 and age_h < newer_than_hours
+        if fp not in keep and (fp in wanted or recent):
             call("DELETE", f"/certificates/{c['id']}")
             print(f"revoked orphaned certificate {c['id']} ({fp})")
         else:
-            print(f"existing IOS_DISTRIBUTION certificate {c['id']} fingerprint {fp} (kept)")
+            print(f"existing IOS_DISTRIBUTION certificate {c['id']} fingerprint {fp} issued {issued:%Y-%m-%d} (kept)")
+
+
+def find_certificate_id(fingerprint: str):
+    for c in call("GET", "/certificates", params={"filter[certificateType]": "IOS_DISTRIBUTION", "limit": 200}).get("data", []):
+        if sha1_fingerprint(c["attributes"]["certificateContent"]) == fingerprint:
+            return c["id"]
+    return None
+
+
+def ensure_profile(bundle_id_res: str, cert_id: str) -> bytes:
+    """Return an App Store profile for this bundle ID + certificate, creating one if needed."""
+    profiles = call(
+        "GET",
+        "/profiles",
+        params={"filter[profileType]": "IOS_APP_STORE", "filter[profileState]": "ACTIVE", "include": "bundleId,certificates", "limit": 200},
+    )
+    for p in profiles.get("data", []):
+        rel = p.get("relationships", {})
+        b = (rel.get("bundleId", {}).get("data") or {}).get("id")
+        certs = {c["id"] for c in rel.get("certificates", {}).get("data", [])}
+        if b == bundle_id_res and cert_id in certs and p["attributes"].get("profileContent"):
+            print(f"reusing profile {p['id']} ({p['attributes']['name']})")
+            return base64.b64decode(p["attributes"]["profileContent"])
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M")
+    created = call(
+        "POST",
+        "/profiles",
+        json={
+            "data": {
+                "type": "profiles",
+                "attributes": {"name": f"{APP_NAME} App Store {stamp}", "profileType": "IOS_APP_STORE"},
+                "relationships": {
+                    "bundleId": {"data": {"type": "bundleIds", "id": bundle_id_res}},
+                    "certificates": {"data": [{"type": "certificates", "id": cert_id}]},
+                },
+            }
+        },
+    )
+    print(f"profile created: {created['data']['id']}")
+    return base64.b64decode(created["data"]["attributes"]["profileContent"])
 
 
 def write_credentials(p12_path: pathlib.Path, profile_path: pathlib.Path):
@@ -109,15 +159,21 @@ def main():
     profile_path = OUT / "appstore.mobileprovision"
 
     existing_p12 = os.environ.get("EXISTING_P12_B64", "").strip()
-    existing_profile = os.environ.get("EXISTING_PROFILE_B64", "").strip()
-    if existing_p12 and existing_profile:
-        p12_path.write_bytes(base64.b64decode(existing_p12))
-        profile_path.write_bytes(base64.b64decode(existing_profile))
-        print("reusing credentials from secrets")
-        write_credentials(p12_path, profile_path)
-        return
-
     bundle_id_res = ensure_bundle_id()
+
+    if existing_p12:
+        p12_bytes = base64.b64decode(existing_p12)
+        _, cert, _ = pkcs12.load_key_and_certificates(p12_bytes, P12_PASSWORD.encode())
+        fp = cert.fingerprint(hashes.SHA1()).hex().upper()
+        cert_id = find_certificate_id(fp)
+        if cert_id:
+            print(f"reusing stored distribution certificate {cert_id} ({fp})")
+            p12_path.write_bytes(p12_bytes)
+            profile_path.write_bytes(ensure_profile(bundle_id_res, cert_id))
+            write_credentials(p12_path, profile_path)
+            return
+        print(f"stored certificate {fp} no longer exists on Apple; issuing a new one")
+
     revoke_orphaned_certificates()
 
     # New key + CSR
@@ -153,28 +209,11 @@ def main():
     )
     p12_path.write_bytes(p12)
 
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M")
-    profile_res = call(
-        "POST",
-        "/profiles",
-        json={
-            "data": {
-                "type": "profiles",
-                "attributes": {"name": f"{APP_NAME} App Store {stamp}", "profileType": "IOS_APP_STORE"},
-                "relationships": {
-                    "bundleId": {"data": {"type": "bundleIds", "id": bundle_id_res}},
-                    "certificates": {"data": [{"type": "certificates", "id": cert_id}]},
-                },
-            }
-        },
-    )
-    profile_path.write_bytes(base64.b64decode(profile_res["data"]["attributes"]["profileContent"]))
-    print(f"profile created: {profile_res['data']['id']}")
+    profile_path.write_bytes(ensure_profile(bundle_id_res, cert_id))
 
     write_credentials(p12_path, profile_path)
     # Emit base64 copies so they can be saved as secrets and reused next time.
     (OUT / "dist.p12.b64").write_text(base64.b64encode(p12_path.read_bytes()).decode())
-    (OUT / "appstore.mobileprovision.b64").write_text(base64.b64encode(profile_path.read_bytes()).decode())
 
 
 if __name__ == "__main__":

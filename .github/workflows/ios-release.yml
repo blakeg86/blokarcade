@@ -62,10 +62,38 @@ jobs:
           npx tsc --noEmit
           npx jest --ci
 
+      - name: Link EAS project
+        run: eas init --force --non-interactive
+        env:
+          EXPO_NO_TELEMETRY: 1
+
+      # Signing files are kept as sensitive EAS environment variables so every
+      # run reuses the same certificate (Apple allows only one per account).
+      - name: Fetch stored signing credentials from EAS
+        run: |
+          for k in IOS_DIST_P12_B64 IOS_PROFILE_B64; do
+            if [ -z "${!k:-}" ]; then
+              v=$(eas env:get --variable-name "$k" --variable-environment production --scope project --format short --non-interactive 2>/dev/null | sed -n "s/^$k=//p" | tr -d '[:space:]' || true)
+              if [ -n "$v" ] && [ "$v" != "*****" ]; then echo "::add-mask::$v"; echo "$k=$v" >> "$GITHUB_ENV"; echo "loaded $k from EAS"; else echo "no stored $k"; fi
+            fi
+          done
+        env:
+          EXPO_NO_TELEMETRY: 1
+          FORCE_COLOR: 0
+
       - name: Provision signing credentials
         run: |
           export EXISTING_P12_B64="$IOS_DIST_P12_B64" EXISTING_PROFILE_B64="$IOS_PROFILE_B64"
+          export REVOKE_CERT_FINGERPRINTS="E30DBA39E7A05053F91F292529F177220F3ACC93"
           python scripts/apple_credentials.py
+
+      - name: Store new signing credentials in EAS
+        if: hashFiles('credentials/dist.p12.b64') != ''
+        run: |
+          eas env:set --name IOS_DIST_P12_B64 --value "$(cat credentials/dist.p12.b64)" --environment production --scope project --visibility sensitive --type string --non-interactive
+          eas env:set --name IOS_PROFILE_B64 --value "$(cat credentials/appstore.mobileprovision.b64)" --environment production --scope project --visibility sensitive --type string --non-interactive
+        env:
+          EXPO_NO_TELEMETRY: 1
 
       - name: Save newly created credentials (reuse them as secrets next time)
         if: hashFiles('credentials/dist.p12.b64') != ''
@@ -76,11 +104,6 @@ jobs:
             credentials/dist.p12.b64
             credentials/appstore.mobileprovision.b64
           retention-days: 7
-
-      - name: Link EAS project
-        run: eas init --force --non-interactive
-        env:
-          EXPO_NO_TELEMETRY: 1
 
       - name: EAS build (iOS, production)
         run: eas build --platform ios --profile production --non-interactive --no-wait --json > build.json

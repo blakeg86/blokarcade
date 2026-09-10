@@ -1,5 +1,5 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import BackButton from '@/components/BackButton';
 import GameOver from '@/components/GameOver';
@@ -13,7 +13,10 @@ const GRAVITY = 0.9;
 const JUMP_FORCE = -15;
 const PLAYER = 34;
 const PLAYER_X = 60;
-const BASE_SPEED = 6;
+const BASE_SPEED = 3.6; // starts gentle; ramps with distance
+const MAX_SPEED_BONUS = 6;
+const JUMP_BUFFER_FRAMES = 8; // a tap slightly before landing still jumps
+const COYOTE_FRAMES = 4; // a tap just after leaving the ground still jumps
 
 type ObstacleType = 'ground' | 'floating' | 'tall';
 interface Obstacle {
@@ -44,6 +47,8 @@ export default function JumpRun() {
   const distance = useRef(0);
   const nextSpawn = useRef(0);
   const nextId = useRef(1);
+  const jumpBuffer = useRef(0);
+  const airFrames = useRef(0);
   const [, setFrame] = useState(0);
 
   const resetWorld = useCallback(() => {
@@ -51,8 +56,10 @@ export default function JumpRun() {
     velocity.current = 0;
     obstacles.current = [];
     distance.current = 0;
-    nextSpawn.current = 60;
+    nextSpawn.current = 90;
     nextId.current = 1;
+    jumpBuffer.current = 0;
+    airFrames.current = 0;
   }, []);
 
   const jump = () => {
@@ -63,7 +70,13 @@ export default function JumpRun() {
       return;
     }
     if (round.phaseRef.current !== 'playing') return;
-    if (playerY.current >= 0) velocity.current = JUMP_FORCE;
+    if (playerY.current >= 0 || airFrames.current <= COYOTE_FRAMES) {
+      velocity.current = JUMP_FORCE;
+      airFrames.current = COYOTE_FRAMES + 1;
+      jumpBuffer.current = 0;
+    } else {
+      jumpBuffer.current = JUMP_BUFFER_FRAMES;
+    }
   };
 
   const spawn = (speed: number) => {
@@ -73,19 +86,31 @@ export default function JumpRun() {
     obstacles.current.push({ id: nextId.current++, x: width + 20, ...s, type });
     // Gap is measured in frames, so the pixel gap grows with speed and a
     // full jump arc (~33 frames) always fits between obstacles.
-    const minGap = 50 + speed * 1.5;
-    nextSpawn.current = minGap + Math.random() * 40;
+    const minGap = 60 + speed * 2;
+    nextSpawn.current = minGap + Math.random() * 50;
   };
 
   useGameLoop((dt) => {
     if (round.phaseRef.current !== 'playing') return;
-    const speed = BASE_SPEED + Math.min(distance.current / 600, 8);
+    // Ramp: +1 speed unit every ~1500 px of distance, capped.
+    const speed = BASE_SPEED + Math.min(distance.current / 1500, MAX_SPEED_BONUS);
 
     velocity.current += GRAVITY * dt;
     playerY.current += velocity.current * dt;
     if (playerY.current > 0) {
       playerY.current = 0;
       velocity.current = 0;
+    }
+    if (playerY.current >= 0) {
+      airFrames.current = 0;
+      if (jumpBuffer.current > 0) {
+        velocity.current = JUMP_FORCE;
+        jumpBuffer.current = 0;
+        airFrames.current = COYOTE_FRAMES + 1;
+      }
+    } else {
+      airFrames.current += dt;
+      if (jumpBuffer.current > 0) jumpBuffer.current -= dt;
     }
 
     distance.current += speed * dt;
@@ -118,7 +143,12 @@ export default function JumpRun() {
   };
 
   return (
-    <Pressable style={styles.container} onPress={jump} testID="jumprun-screen">
+    <View
+      style={styles.container}
+      testID="jumprun-screen"
+      onStartShouldSetResponder={() => true}
+      onResponderGrant={jump}
+    >
       <BackButton />
       <Hud score={round.score} best={round.best} />
 
@@ -156,7 +186,7 @@ export default function JumpRun() {
       {round.phase === 'over' && (
         <GameOver score={round.score} highScore={round.best} isNewRecord={round.isNewRecord} onRestart={restart} />
       )}
-    </Pressable>
+    </View>
   );
 }
 

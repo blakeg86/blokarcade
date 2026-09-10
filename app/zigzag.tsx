@@ -1,5 +1,5 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import BackButton from '@/components/BackButton';
 import GameOver from '@/components/GameOver';
@@ -8,11 +8,12 @@ import TapToStart from '@/components/TapToStart';
 import Colors from '@/constants/colors';
 import { useGameLoop } from '@/hooks/useGameLoop';
 import { useRound } from '@/hooks/useRound';
-import { BASE_WIDTH, SEGMENT_LENGTH, nextSegment, speedForScore, type Segment } from '@/lib/zigzag';
+import { SEGMENT_LENGTH, nextSegment, speedForScore, type Segment } from '@/lib/zigzag';
 
 const BALL = 16;
-const BASE_SCROLL = 3.4;
-const DRIFT = 2.6;
+const BASE_SCROLL = 2.4;
+const DRIFT = 1.7;
+const RUNWAY_SEGMENTS = 6; // straight, centred path before the zigzag begins
 
 interface PlacedSegment extends Segment {
   y: number; // top of segment on screen
@@ -25,6 +26,7 @@ export default function ZigZag() {
   const centerX = width / 2;
   const playerY = height * 0.62;
   const halfPlay = width / 2 - 24;
+  const baseWidth = Math.round(Math.min(width * 0.6, 260)); // path starts wide, narrows over time
 
   const segments = useRef<PlacedSegment[]>([]);
   const dirState = useRef<{ dir: 1 | -1; left: number }>({ dir: 1, left: 0 });
@@ -40,19 +42,19 @@ export default function ZigZag() {
     passed.current = 0;
     // Start with a straight runway under the player, then build the path upward.
     const list: PlacedSegment[] = [];
-    let prev: Segment = { x: 0, index: 0, width: BASE_WIDTH };
+    let prev: Segment = { x: 0, index: 0, width: baseWidth };
     let y = playerY + SEGMENT_LENGTH * 3;
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < RUNWAY_SEGMENTS; i++) {
       list.push({ ...prev, index: 0, y });
       y -= SEGMENT_LENGTH;
     }
     while (y > -SEGMENT_LENGTH * 2) {
-      prev = nextSegment(prev, halfPlay, Math.random, dirState.current);
+      prev = nextSegment(prev, halfPlay, Math.random, dirState.current, baseWidth);
       list.push({ ...prev, y });
       y -= SEGMENT_LENGTH;
     }
     segments.current = list;
-  }, [playerY, halfPlay]);
+  }, [playerY, halfPlay, baseWidth]);
 
   useGameLoop((dt) => {
     if (round.phaseRef.current !== 'playing') return;
@@ -70,7 +72,7 @@ export default function ZigZag() {
     }
     let top = list[list.length - 1];
     while (top.y > -SEGMENT_LENGTH * 2) {
-      const next = nextSegment(top, halfPlay, Math.random, dirState.current);
+      const next = nextSegment(top, halfPlay, Math.random, dirState.current, baseWidth);
       const placed = { ...next, y: top.y - SEGMENT_LENGTH };
       list.push(placed);
       top = placed;
@@ -106,7 +108,12 @@ export default function ZigZag() {
   };
 
   return (
-    <Pressable style={styles.container} onPress={tap} testID="zigzag-screen">
+    <View
+      style={styles.container}
+      testID="zigzag-screen"
+      onStartShouldSetResponder={() => true}
+      onResponderGrant={tap}
+    >
       <BackButton />
       <Hud score={round.score} best={round.best} />
       {round.phase === 'idle' && <TapToStart title="ZIG ZAG" hint="TAP TO CHANGE DIRECTION" />}
@@ -132,7 +139,7 @@ export default function ZigZag() {
       {round.phase === 'over' && (
         <GameOver score={round.score} highScore={round.best} isNewRecord={round.isNewRecord} onRestart={restart} />
       )}
-    </Pressable>
+    </View>
   );
 }
 

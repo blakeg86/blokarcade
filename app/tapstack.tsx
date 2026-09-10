@@ -1,5 +1,5 @@
 import React, { useCallback, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import BackButton from '@/components/BackButton';
 import GameOver from '@/components/GameOver';
@@ -89,7 +89,12 @@ export default function TapStack() {
   const movingTop = baseY - rows * BLOCK_H + cameraShift;
 
   return (
-    <Pressable style={styles.container} onPress={tap} testID="tapstack-screen">
+    <View
+      style={styles.container}
+      testID="tapstack-screen"
+      onStartShouldSetResponder={() => true}
+      onResponderGrant={tap}
+    >
       <BackButton />
       <Hud score={round.score} best={round.best} />
       {round.phase === 'idle' && <TapToStart title="TAP STACK" hint="TAP WHEN THE BLOCK LINES UP" />}
@@ -128,7 +133,7 @@ export default function TapStack() {
       {round.phase === 'over' && (
         <GameOver score={round.score} highScore={round.best} isNewRecord={round.isNewRecord} onRestart={restart} />
       )}
-    </Pressable>
+    </View>
   );
 }
 

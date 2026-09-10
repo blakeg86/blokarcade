@@ -21,6 +21,8 @@ export default function RootLayout() {
         <Stack
           screenOptions={{
             headerShown: false,
+            gestureEnabled: false, // iOS edge-swipe-back stole Snake's right swipes
+            fullScreenGestureEnabled: false,
             animation: 'fade',
             animationDuration: 200,
             contentStyle: { backgroundColor: Colors.background },

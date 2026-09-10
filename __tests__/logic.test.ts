@@ -149,11 +149,11 @@ describe('tapstack', () => {
 });
 
 describe('zigzag', () => {
-  test('path narrows every 10 segments', () => {
-    expect(widthForSegment(0)).toBe(120);
-    expect(widthForSegment(9)).toBe(120);
-    expect(widthForSegment(10)).toBe(112);
-    expect(widthForSegment(999)).toBe(56);
+  test('path narrows gradually every 10 segments down to a floor', () => {
+    expect(widthForSegment(0, 220)).toBe(220);
+    expect(widthForSegment(9, 220)).toBe(220);
+    expect(widthForSegment(10, 220)).toBe(207);
+    expect(widthForSegment(999, 220)).toBe(64);
   });
   test('speed +5% every 15 points', () => {
     expect(speedForScore(3, 14)).toBe(3);
@@ -162,9 +162,9 @@ describe('zigzag', () => {
   test('segments never leave the play area', () => {
     const rng = seeded(5);
     const state = { dir: 1 as 1 | -1, left: 0 };
-    let seg = { x: 0, index: 0, width: 120 };
+    let seg = { x: 0, index: 0, width: 220 };
     for (let i = 0; i < 500; i++) {
-      seg = nextSegment(seg, 160, rng, state);
+      seg = nextSegment(seg, 160, rng, state, 220);
       expect(Math.abs(seg.x) + seg.width / 2).toBeLessThanOrEqual(160 + 1e-9);
     }
   });

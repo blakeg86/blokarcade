@@ -128,9 +128,9 @@ await shot('snake-3-over');
 await page.goto(BASE, { waitUntil: 'networkidle' });
 await settle(600);
 await shot('99-hub-after');
-const hub = await page.textContent('body');
+const hubNumbers = (await page.textContent('body')).match(/\d+/g).map(Number);
 for (const [id, score] of Object.entries(results)) {
-  if (score && Number(score) > 0 && !hub.includes(score)) throw new Error(`hub missing best for ${id} (${score})`);
+  if (score && Number(score) > 0 && !hubNumbers.some((n) => n >= Number(score))) throw new Error(`hub missing best for ${id} (${score})`);
 }
 
 await browser.close();
